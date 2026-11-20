@@ -1,0 +1,6 @@
+node_modules/
+.dsh-scratch/
+*.tgz
+*.log
+.env
+.env.*

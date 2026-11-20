@@ -1,0 +1,4 @@
+# 保留旧入口 ID，以复用已有日常模型名单；不要与旧包同时加载。
+- insert:
+    - id: team-terra-ultra
+      name: dsh-agent-team-fix
