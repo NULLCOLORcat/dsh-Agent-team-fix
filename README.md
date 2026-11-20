@@ -10,17 +10,19 @@
 
 适用环境：**DSH 0.2.2-rc.5 · web profile · 本地 Agent Teams**。
 
-**方式一：在 DSH 插件安装界面填写「包名或地址」**
+**方式一（推荐）：在 DSH 中直接填包名安装**
 
-打开 **插件与设置 → 安装插件**，在「包名或地址」中输入 GitHub 地址，确认安装并启用：
+打开 **插件与设置 → 安装插件**，在「包名或地址」中粘贴下面的包名，确认安装并启用。无需下载文件或打开终端。
 
 ```text
-https://github.com/NULLCOLORcat/dsh-Agent-team-fix
+dsh-agent-team-fix
 ```
 
-同一栏也支持直接填写 npm 包名 `dsh-agent-team-fix`，前提是你使用的安装源已有正式发布的版本；如果查不到，请用上面的 GitHub 地址。
+DSH 会从配置的 npm 安装源获取发布版。[查看 npm 版本](https://www.npmjs.com/package/dsh-agent-team-fix)。如果镜像尚未同步，可改用下面的 GitHub 方式。
 
-**方式二：用命令行从 GitHub 安装**
+**方式二：从 GitHub 安装**
+
+在同一安装框中粘贴 `https://github.com/NULLCOLORcat/dsh-Agent-team-fix`，或用命令行安装：
 
 ```sh
 dsh plugin --profile web add github:NULLCOLORcat/dsh-Agent-team-fix
