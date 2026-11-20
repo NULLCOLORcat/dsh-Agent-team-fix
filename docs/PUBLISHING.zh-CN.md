@@ -9,6 +9,12 @@
 3. 在 GitHub 建空仓库，不预生成 README，以本项目为仓库根目录。初始化 `main`，审阅暂存差异后提交，设置 `origin` 为自己的 HTTPS 或 SSH 地址，执行 `git push -u origin main`。不要覆盖已有历史，不把令牌写入仓库 URL。参考 [GitHub 官方说明](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github)。
 4. 为仓库添加 `dsh-plugin` topic；公开后从干净的兼容 profile 验证 `dsh plugin --profile web add github:OWNER/dsh-Agent-team-fix`。如发 Release，可打相应版本标签、附 `npm pack` 生成的 tgz 并公布校验和。发布仓库、Release、npm、市场投稿是不同操作。
 
+## 可选：发布 npm 公共包
+
+包名为 `dsh-agent-team-fix`。在本项目根目录完成测试后，用 `npm pack --ignore-scripts` 生成归档并检查文件清单。用你自己的 npm 账户运行 `npm login --registry=https://registry.npmjs.org/`，再用 `npm whoami --registry=https://registry.npmjs.org/` 核对账号。不要把密码、OTP 或 token 写入仓库或聊天。
+
+对**同一个归档**先执行 `npm publish <归档.tgz> --dry-run --ignore-scripts --access public`，再去掉 `--dry-run` 并指定 `--registry=https://registry.npmjs.org/` 正式发布；按 npm 的提示完成身份验证。已发布的包名和版本组合不能复用。用 `npm view dsh-agent-team-fix@<版本> dist.integrity --registry=https://registry.npmjs.org/` 核对线上摘要，再把 README 的安装方式改为可直接填包名。详见 [npm 官方发布指南](https://docs.npmjs.com/creating-and-publishing-unscoped-public-packages/)。
+
 ## 申请 dsh-market 收录
 
 [dsh-market 项目](https://github.com/dsh-market/dsh-market#submit-your-plugin)从 [awesome-dsh-plugin 精选目录](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)收录。以下按其[贡献指南](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)整理，提交当日请复核。

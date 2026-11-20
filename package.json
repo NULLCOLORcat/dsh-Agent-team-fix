@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-team-fix",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Route DSH teammates to daily-task models or optional higher-cost models for difficult work.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/NULLCOLORcat/dsh-Agent-team-fix.git" },
@@ -21,5 +21,5 @@
       "platform": "web"
     }
   },
-  "scripts": { "test": "node --test test.mjs test-client.mjs" }
+  "scripts": { "test": "node --test test.mjs test-client.mjs test-bootstrap.mjs" }
 }

@@ -16,7 +16,7 @@ const metadata = (provider, model) => {
     defaultEffort: 'low',
   } }) };
 };
-function harness(initial = multi()) {
+function harness(initial = multi(), beforeInstall = () => {}) {
   let current = initial;
   const events = new Map(); const tools = new Map(); const selections = new WeakMap();
   const roots = new WeakMap(); const enabled = new WeakSet(); const agents = new Map();
@@ -82,8 +82,10 @@ function harness(initial = multi()) {
     complete(_exec, outcome) { return outcome.result; }
   }
   const config = Object.fromEntries(Object.keys(DEFAULT_POLICY).map((key) => [key, { get: () => current[key] }]));
-  installRouting(ctx, config, MockPipeline);
-  return { ctx, llm, events, tools, lead, otherLead, regular, enabled, selections, calls, created, create, native, prepared, warnings,
+  const disabled = [];
+  beforeInstall(ctx, MockPipeline);
+  installRouting(ctx, config, MockPipeline, message => disabled.push(message));
+  return { ctx, llm, events, tools, lead, otherLead, regular, enabled, selections, calls, created, create, native, prepared, warnings, disabled,
     setPolicy: (value) => { current = value; },
     invoke: (name, request, agent = lead, signal = new AbortController().signal, toolSet) => tools.get(name).execute(request,
       { agent, signal, toolSet, callId: 'outer', rootCallId: 'root', token: 'outer-token', deferContext() {} }),
@@ -307,6 +309,116 @@ test('hard route obeys native admission, guard denial, cancellation and binding 
   assert.equal(h.calls.length, 0);
   h.native.execute = async () => ({ name: 'missing' });
   await assert.rejects(h.invoke(hard, args('missing', plain)), /did not bind/);
+});
+
+function assertDisabledOnce(h) {
+  assert.equal(h.disabled.length, 1);
+  assert.match(h.disabled[0], /unsupported Team routing API.*等待更新/);
+  assert.deepEqual(h.warnings, h.disabled);
+  assert.doesNotMatch(h.disabled[0], /PRIVATE/);
+}
+
+test('all early API gaps disable before registration, and failed registration leaves inert hooks/tools', async () => {
+  for (const remove of [ctx => delete ctx.on, ctx => delete ctx.tools.register,
+    ctx => delete ctx.llm.resolveModelInfo, ctx => delete ctx.llm.resolveCallConfig]) {
+    const h = harness(multi(), remove);
+    assertDisabledOnce(h); assert.equal(h.events.size + h.tools.size, 0);
+  }
+  const h = harness(multi(), ctx => {
+    const save = ctx.tools.register;
+    ctx.tools.register = (...params) => { save(...params); if (params[0].name === spawn) throw Error('PRIVATE registry data'); };
+  });
+  assert.equal(h.tools.get(list).when({ agent: h.lead }), false);
+  await assert.rejects(h.invoke(spawn, args('stale')), /等待更新/);
+  assert.equal(h.selections.has(await h.create(h.lead, 'ordinary')), false);
+  assert.equal(h.selections.has(await h.create(h.lead, 'history', 'fresh', true)), false);
+  assertDisabledOnce(h);
+});
+
+test('late method removal hides all tools but keeps existing guard and next error identity', async () => {
+  const h = harness(); const member = await h.create(h.lead, 'bound');
+  delete h.ctx.subagents.rootOf;
+  for (const tool of h.tools.values()) assert.equal(tool.when({ agent: h.lead }), false);
+  await assert.rejects(h.invoke(list, {}), /等待更新/);
+  await assert.rejects(h.request(member, plain), /overridden/);
+  assert.deepEqual(await h.request(member, selection(terra, 'ultra')), selection(terra, 'ultra'));
+  const err = new TypeError('PRIVATE downstream is not a function'); let count = 0;
+  await assert.rejects(h.events.get('agent/request')({ agent: member }, () => { count++; throw err; }), e => e === err);
+  assert.equal(count, 1); assertDisabledOnce(h);
+  assert.equal(harness().warnings.length, 0);
+});
+
+test('membership implementation failures, async replacements and nonboolean flags fail closed', async () => {
+  for (const alter of [ctx => { ctx.subagents.rootOf = () => { throw Error('PRIVATE membership failure'); }; },
+    ctx => { ctx.subagents.rootOf = async () => { throw Error('PRIVATE asynchronous rejection'); }; },
+    ctx => { ctx.agentTeams.isEnabled = () => 'yes'; }]) {
+    const h = harness(); alter(h.ctx);
+    assert.equal(h.tools.get(list).when({ agent: h.lead }), false);
+    assert.equal(h.selections.has(await h.create(h.lead, 'ordinary')), false);
+    assertDisabledOnce(h);
+  }
+  const h = harness(); h.ctx.agentTeams.isEnabled = () => { throw Object.assign(Error('no access'), { code: 'FORBIDDEN' }); };
+  assert.equal(h.tools.get(list).when({ agent: h.lead }), false); assert.equal(h.warnings.length, 0);
+});
+
+test('broken notification channels cannot prevent disabling or leak unhandled rejections', async () => {
+  for (const asyncLogger of [true, false]) {
+    let logged = 0, notified = 0;
+    const fail = asyncMode => { if (asyncMode) return Promise.reject(Error('PRIVATE')); throw Error('PRIVATE'); };
+    installRouting({ logger: { warn() { logged++; return fail(asyncLogger); } } }, undefined, undefined,
+      () => { notified++; return fail(!asyncLogger); });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual([logged, notified], [1, 1]);
+  }
+});
+
+test('resume bypasses missing header; malformed ordinary startup degrades without breaking creation', async () => {
+  const h = harness(); const created = h.events.get('agent/created');
+  await created({ source: 'resume' }); assert.equal(h.disabled.length, 0);
+  await created({ agent: {}, source: 'startup' }); await created(undefined);
+  assert.equal(h.tools.get(list).when({}), false); assertDisabledOnce(h);
+});
+
+test('mid-flight structural fault refuses explicit creation without fallback or replay', async () => {
+  const h = harness(); let attempts = 0;
+  h.native.execute = async () => {
+    attempts++;
+    await h.events.get('agent/created')({ source: 'startup', agent: { session: { header: {
+      origin: 'subagent', parentSession: h.lead.id, id: 'PRIVATE child' } } } });
+    assert.fail('explicit creation must not proceed without model.select');
+  };
+  await assert.rejects(h.invoke(spawn, args('explicit', luna)), /等待更新/);
+  await assert.rejects(h.invoke(spawn, args('stale', plain)), /等待更新/);
+  assert.equal(attempts, 1); assertDisabledOnce(h);
+});
+
+test('degradation between preparing an explicit call and dispatch prevents native creation', async () => {
+  const h = harness(multi(), (_ctx, Pipeline) => {
+    const prepare = Pipeline.prototype.prepare;
+    Pipeline.prototype.prepare = async function(exec) {
+      const result = prepare.call(this, exec);
+      await h.events.get('agent/created')(null);
+      return result;
+    };
+  });
+  await assert.rejects(h.invoke(spawn, args('stale')), /等待更新/);
+  assert.equal(h.calls.length, 0); assertDisabledOnce(h);
+});
+
+test('ordinary provider, config, auth, cancellation and native failures never open breaker', async () => {
+  const h = harness(); const failure = new TypeError('PRIVATE is not a function');
+  h.native.execute = () => { throw failure; };
+  await assert.rejects(h.invoke(spawn, args('native')), e => e === failure);
+  await assert.rejects(h.invoke(spawn, args('model', { ...plain, reasoning_effort: 'high' })), /does not support/);
+  await assert.rejects(h.invoke(spawn, args('auth'), h.regular), /Only the Lead/);
+  await assert.rejects(h.invoke(spawn, args('permission'), h.lead, undefined, new Set()), /not admitted/);
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(h.invoke(spawn, args('cancel'), h.lead, controller.signal), /abort/i);
+  h.llm.resolveModelInfo = () => { throw failure; };
+  await assert.rejects(h.invoke(spawn, args('provider')), e => e === failure);
+  h.setPolicy({ ...multi(), allowedModels: [] }); await assert.rejects(h.invoke(list, {}), /at least one/);
+  h.setPolicy(multi()); assert.equal(h.tools.get(list).when({ agent: h.lead }), true);
+  assert.deepEqual([h.disabled, h.warnings], [[], []]);
 });
 
 test('resolved-route mismatch refuses silent provider/model or effort fallback', async () => {

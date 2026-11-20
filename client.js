@@ -215,6 +215,31 @@ window.__ModuleLoader__.load({
             !row.available && h("span", { className: "route" }, "当前不可用"))))),
         !rows.length && ready && h("p", null, "当前没有提供方公布模型。"));
     }
+    /** 详情页挂载和手动刷新时读取 Host 只读状态；卡片卸载/换次请求后丢弃迟到的响应。 */
+    function RoutingStatus() {
+      const [status, setStatus] = React.useState('loading');
+      const [revision, refresh] = React.useReducer(n => n + 1, 0);
+      React.useEffect(() => {
+        let live = true;
+        const controller = new AbortController();
+        async function load() {
+          try {
+            // 与 rc.5 Connection 相同：优先桌面壳载体，Web 使用同源相对 URL（保留部署前缀）。
+            const send = window.__DSH_TRANSPORT__?.fetch ?? globalThis.fetch;
+            const response = await send('api/team-terra-ultra/status', { method: 'GET', cache: 'no-store', signal: controller.signal });
+            const state = response.ok && (await response.json()).status;
+            if (live) setStatus(['ready', 'waiting', 'disabled'].includes(state) ? state : 'unknown');
+          } catch { if (live) setStatus('unknown'); }
+        }
+        load();
+        return () => { live = false; controller.abort(); };
+      }, [revision]);
+      const labels = { ready: '队友模型路由已就绪。', waiting: '队友模型路由尚未启用，正在等待 Host 路由服务。',
+        disabled: '队友模型路由已停用：当前 Host 接口不兼容。请检查插件与 DSH 版本，更新后重新加载插件。',
+        unknown: '无法读取队友模型路由状态；请检查插件管理器的 Host 状态。', loading: '正在读取队友模型路由状态…' };
+      return h('div', null, h('p', { className: 'warning', role: status === 'disabled' ? 'alert' : 'status' }, labels[status]),
+        h('button', { type: 'button', onClick: refresh }, '刷新路由状态'));
+    }
     function TeamModelCard(props) {
       const state = props.useTeamModelCard((snapshot) => snapshot);
       const c = props.controller;
@@ -226,6 +251,7 @@ window.__ModuleLoader__.load({
       const efforts = state.defaultRoute?.reasoning?.efforts ?? [];
       const effort = state.value.defaultReasoningEffort;
       return h("form", { className: "team-terra-settings", onSubmit: (event) => { event.preventDefault(); c.save(); } },
+        h(RoutingStatus),
         h("section", null, h("h3", null, "日常任务模型"),
           !state.available && notice("该插件当前未加载或设置尚未就绪；草稿会保留。"),
           state.available && !state.writable && notice("本部署的设置为只读。"),
