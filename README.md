@@ -16,8 +16,9 @@
 
 
 
+<details>
+<summary> 安装 </summary>
 
-## 安装
 
 1. **方式一（推荐）：在 DSH 中直接填包名安装**
 
@@ -38,6 +39,8 @@ dsh plugin --profile web add github:NULLCOLORcat/dsh-Agent-team-fix
 ```
 
 安装后，在 **插件与设置 → dsh-Agent-team-fix** 选择模型并保存，再在需要使用的会话中开启团队模式。
+
+</details>
 
 <details>
 <summary>设置与技术细节</summary>
