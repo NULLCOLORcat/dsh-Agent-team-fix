@@ -1,4 +1,4 @@
-# 保留旧入口 ID，以复用已有日常模型名单；不要与旧包同时加载。
+# 保留旧入口 ID 以复用 smartModels；授权名单仍归 DSH 官方设置管理。
 - insert:
     - id: team-terra-ultra
       name: dsh-agent-team-fix

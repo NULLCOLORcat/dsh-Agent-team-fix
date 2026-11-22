@@ -1,4 +1,4 @@
-// 离线契约测试：仅在 VM 中加载浏览器模块；不连接 Host、不改实际配置。
+// 离线契约测试：通过 ModuleLoader/槽位创建扩展，不连接 Host 或写入实际配置。
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -8,151 +8,299 @@ let api;
 vm.runInNewContext(readFileSync(new URL('./client.js', import.meta.url), 'utf8'), {
   window: { __ModuleLoader__: { load: ({ id, factory }) => {
     assert.equal(id, 'dsh-agent-team-fix');
-    api = factory((id) => { assert.equal(id, 'react'); return {
-      useId: () => 'fixture', createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) })
-    }; });
+    api = factory((id) => {
+      assert.equal(id, 'react');
+      return { useId: () => 'fixture', createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat(Infinity) }) };
+    });
   } } },
-  document: { createElement: () => ({ dataset: {}, remove() {} }), head: { appendChild() {} } }
+  document: { createElement: () => ({ dataset: {}, remove() {} }), head: { appendChild() {} } },
 });
 const plain = (value) => JSON.parse(JSON.stringify(value));
-const terra = { provider: 'openai-codex', model: 'gpt-6.1-terra' };
-const other = { provider: 'second', model: 'model' };
-const initial = () => ({ allowedModels: [terra], defaultModel: terra, defaultReasoningEffort: 'ultra' });
-const catalog = { ok: true, value: { groups: [
-  { id: terra.provider, name: 'Codex', models: [{ id: terra.model, name: 'Terra', reasoning: { efforts: [{ id: 'ultra', name: 'Ultra' }, { id: 'low', name: 'Low' }], defaultEffort: 'low' } }] },
-  { id: other.provider, name: 'Second', models: [{ id: other.model, name: 'Other', reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } }] }
-], failures: [] } };
-function fixture(load = async () => catalog) {
-  let snapshot = { status: 'ready', writable: true, revision: 1, value: initial() };
-  const listeners = new Set(); const calls = [];
-  const scope = { getSnapshot: () => snapshot, subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
-    mutate: async (ops, revision) => {
-      calls.push({ ops, revision });
-      assert.equal(revision, snapshot.revision);
-      const value = { ...snapshot.value };
-      for (const op of ops) value[op.path[0]] = op.value;
-      update({ value, revision: snapshot.revision + 1 });
-    }
-  };
-  const update = (patch) => { snapshot = { ...snapshot, ...patch }; for (const fn of listeners) fn(); };
-  const c = new api.TeamModelController(scope, { remote: { session: { modelCatalog: load } } });
-  return { c, scope, calls, update };
-}
-const tick = async () => { await Promise.resolve(); await Promise.resolve(); };
+const a = { provider: 'p1', model: 'shared' };
+const b = { provider: 'p2', model: 'shared' };
+const c = { provider: 'p2', model: 'another' };
+const stale = { provider: 'removed', model: 'old' };
+const ownNS = 'team-terra-ultra';
+const officialNS = 'subagent-model-selection-settings';
+const officialSubject = { kind: 'item', id: 'subagent' };
 
-// 走宿主注册入口而非直接调用内部组件，检查实际挂载位置和原生控件回调。
-function mounted(scope, load) {
-  const registrations = []; const cleanup = [];
+function form(value, initial = {}) {
+  let snapshot = { status: 'ready', writable: true, revision: 1, value, ...initial };
+  const calls = [];
+  const listeners = new Set();
+  const update = (patch) => { snapshot = { ...snapshot, ...patch }; for (const listener of listeners) listener(); };
+  const handle = {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    mutate: async (ops, revision) => {
+      calls.push({ ops: plain(ops), revision });
+      assert.equal(revision, snapshot.revision);
+      assert.equal(ops.length, 1);
+      const [op] = ops;
+      assert.deepEqual(plain(op.path), ['smartModels']);
+      update({ value: { ...snapshot.value, smartModels: op.value }, revision: snapshot.revision + 1 });
+      return true;
+    },
+  };
+  return { handle, update, calls, listeners };
+}
+function fixture({ stored = [], allowed = [a, b], enabled = true, ownInitial, officialInitial } = {}) {
+  const own = form({ smartModels: stored, defaultModel: 'preserve-legacy' }, ownInitial);
+  const official = form({ enabled, allowedModels: allowed }, officialInitial);
+  // 不提供任何官方写入能力，以便意外的越权调用立即暴露。
+  delete official.handle.mutate;
+  const controller = new api.TeamModelController(own.handle, official.handle);
+  return { controller, own, official };
+}
+
+// 模拟宿主注册与编译后的 hook/locale 注入；只判断离线结构和回调，不伪造浏览器视觉验收。
+function mounted(own, official, missingSlot = false) {
+  const registrations = [];
+  const cleanup = [];
+  const events = new Map();
+  const dictionaries = new Map();
   api.apply({
-    effect: (fn) => cleanup.push(fn()), on: () => () => {},
-    remote: { $on: () => () => {}, session: { modelCatalog: load } },
-    configForms: { get: (ns) => { assert.equal(ns, 'team-terra-ultra'); return scope; },
-      whileServed: (names, fn) => { assert.deepEqual(plain(names), ['team-terra-ultra']); return fn(); } },
-    slots: { inject: (name, fn) => { assert.equal(name, 'plugins.bundle.config'); return fn(); },
-      register: (options, component) => { registrations.push({ options, component }); return () => {}; } }
+    effect: (fn) => cleanup.push(fn()),
+    on: (name, fn) => { events.set(name, fn); return () => events.delete(name); },
+    configForms: {
+      get: (ns) => { assert.ok([ownNS, officialNS].includes(ns)); return ns === ownNS ? own : official; },
+      whileServed: (names, fn) => { assert.deepEqual(plain(names), [ownNS]); return fn(); },
+    },
+    locale: { register: (namespace, copy) => { dictionaries.set(namespace, copy); return () => dictionaries.delete(namespace); } },
+    slots: {
+      inject: (name, fn) => { assert.equal(name, 'plugins.detail.section'); return missingSlot ? () => {} : fn(); },
+      register: (options, component) => { registrations.push({ options, component }); return () => registrations.pop(); },
+    },
   });
-  assert.equal(registrations.length, 1);
-  const { options, component } = registrations[0];
-  assert.equal(options.name, 'plugins.bundle.config'); assert.equal(options.key, 'dsh-agent-team-fix');
+  return { registrations, events, dictionaries, dispose: () => cleanup.reverse().forEach((fn) => fn()) };
+}
+function render(mount, subject, lang = 'zh') {
+  const { options, component } = mount.registrations[0];
   const { hooks, controller } = options.inject();
-  return { render: (view = 'page') => component({ view, controller, useTeamModelCard: fn => fn(hooks.teamModelCard.getSnapshot()) }),
-    dispose: () => cleanup.reverse().forEach(fn => fn()) };
+  const root = component({ subject, controller, useDifficultyModels: (fn) => fn(hooks.difficultyModels.getSnapshot()),
+    t: (key) => mount.dictionaries.get(options.locale)[lang][key] });
+  return root ? root.type(root.props) : null;
 }
 function nodes(root, type) {
   if (!root || typeof root !== 'object') return [];
-  return [...(root.type === type ? [root] : []), ...root.children.flatMap(child => nodes(child, type))];
+  return [...(root.type === type ? [root] : []), ...root.children.flatMap((child) => nodes(child, type))];
 }
-test('own bundle shows native controls; one shared catalog; fallback locks only smart choices and persists them', async () => {
-  const { scope, calls, c } = fixture(); c.dispose(); let loads = 0;
-  const ui = mounted(scope, async () => { loads++; return catalog; }); await tick();
-  assert.equal(ui.render('summary'), null);
-  const form = () => ui.render();
-  const sets = () => nodes(form(), 'fieldset');
-  assert.deepEqual(nodes(form(), 'h3').map(n => n.children[0]), ['日常任务模型', '更聪明的模型']);
-  const fallback = () => nodes(form(), 'label').find(n => n.children.includes('高复杂度回退至当前模型')).children[0];
-  const smart = () => nodes(sets()[1], 'input');
-  assert.equal(fallback().props.type, 'checkbox'); assert.equal(fallback().props.checked, false);
-  assert.equal(smart().length, 2); assert.equal(sets()[1].props.disabled, false);
-  assert.ok(nodes(form(), 'span').some(n => n.children.includes('未启用高复杂度回退')));
-  smart()[1].props.onChange(); smart()[0].props.onChange();
-  fallback().props.onChange({ target: { checked: true } });
-  assert.equal(sets()[1].props.disabled, true); assert.equal(sets()[0].props.disabled, false);
-  smart()[1].props.onChange(); // 即使绕过 fieldset 的浏览器禁用，控制器也拒绝修改。
-  assert.equal(smart()[1].props.checked, true);
-  form().props.onSubmit({ preventDefault() {} }); await tick();
-  assert.equal(calls.length, 1); assert.deepEqual(plain(scope.getSnapshot().value.smartModels), [other, terra]);
-  assert.deepEqual(plain(scope.getSnapshot().value.allowedModels), [terra]); assert.equal(scope.getSnapshot().value.fallbackToCurrentModel, true);
-  fallback().props.onChange({ target: { checked: false } }); assert.equal(sets()[1].props.disabled, false);
-  assert.equal(smart()[1].props.checked, true); smart()[0].props.onChange(); smart()[1].props.onChange();
-  form().props.onSubmit({ preventDefault() {} }); await tick();
-  assert.equal(scope.getSnapshot().value.fallbackToCurrentModel, false); assert.deepEqual(plain(scope.getSnapshot().value.smartModels), []);
-  assert.equal(loads, 1); ui.dispose();
+function text(root) {
+  if (typeof root === 'string') return root;
+  if (!root || typeof root !== 'object') return '';
+  return root.children.map(text).join(' ');
+}
+
+test('registers a separate bilingual form on only the official Subagent detail subject', async () => {
+  assert.deepEqual(plain(api.inject), ['slots', 'locale', 'configForms']);
+  assert.equal(api.default.apply, api.apply);
+  const { controller, own, official } = fixture();
+  controller.dispose();
+  const mount = mounted(own.handle, official.handle);
+  assert.equal(mount.registrations.length, 1);
+  assert.equal(mount.registrations[0].options.name, 'plugins.detail.section');
+  assert.equal('key' in mount.registrations[0].options, false);
+  assert.equal(render(mount, { kind: 'item', id: 'wrong' }), null);
+  assert.equal(render(mount, { kind: 'bundle', id: 'subagent' }), null);
+  assert.equal(render(mount, { kind: 'row', id: 'subagent' }), null);
+  assert.equal(render(mount, undefined), null);
+  const zh = () => render(mount, officialSubject);
+  const en = () => render(mount, officialSubject, 'en');
+  assert.deepEqual(nodes(zh(), 'h3').map(text), ['任务难度模型']);
+  assert.deepEqual(nodes(zh(), 'legend').map(text), ['困难任务模型']);
+  assert.deepEqual(nodes(zh(), 'h4').map(text), ['其他已授权模型']);
+  assert.deepEqual(nodes(en(), 'h3').map(text), ['Difficulty Models']);
+  assert.match(text(en()), /snapshot.*at session start/);
+  assert.match(text(zh()), /上方「模型选择」中开启模型选择、勾选允许使用的模型并保存/);
+  assert.match(text(zh()), /不修改官方白名单，也不设置默认模型/);
+  assert.equal(nodes(zh(), 'select').length, 0);
+  assert.deepEqual(nodes(zh(), 'li').map(text), ['p1 / shared', 'p2 / shared']);
+  const button = () => nodes(zh(), 'button').find((item) => item.props.type === 'submit');
+  assert.equal(button().props.disabled, true);
+  const input = nodes(zh(), 'input')[0];
+  assert.equal(input.props.type, 'checkbox');
+  input.props.onChange();
+  assert.equal(nodes(zh(), 'input')[0].props.checked, true);
+  assert.deepEqual(nodes(zh(), 'li').map(text), ['p2 / shared']);
+  assert.equal(button().props.disabled, false);
+  await nodes(zh(), 'form')[0].props.onSubmit({ preventDefault() {} });
+  assert.match(text(zh()), /困难任务模型已保存/);
+  assert.deepEqual(own.calls, [{ ops: [{ op: 'set', path: ['smartModels'], value: [a] }], revision: 1 }]);
+  assert.equal(own.handle.getSnapshot().value.defaultModel, 'preserve-legacy');
+  assert.deepEqual(official.calls, []);
+  mount.dispose();
+  assert.equal(own.listeners.size, 0);
+  assert.equal(official.listeners.size, 0);
+  assert.equal(mount.events.size, 0);
 });
 
-test('native exports and candidate metadata retain unavailable routes', () => {
-  assert.equal(typeof api.apply, 'function'); assert.equal(api.default.apply, api.apply);
-  const rows = api.candidates([], [terra], new Set([api.routeKey(terra)]));
-  assert.equal(rows[0].available, false); assert.equal(rows[0].selected, true);
+test('missing registration capabilities and an undeclared slot do not create a fallback form', () => {
+  assert.doesNotThrow(() => api.apply({ slots: {}, configForms: { get: () => assert.fail('unexpected capability use') } }));
+  const { controller, own, official } = fixture();
+  controller.dispose();
+  const mount = mounted(own.handle, official.handle, true);
+  assert.deepEqual(mount.registrations, []);
+  assert.deepEqual(own.calls, []);
+  mount.dispose();
 });
-test('one fenced atomic write includes exactly five top-level fields', async () => {
-  const { c, calls } = fixture(); await tick();
-  c.toggleModel(api.routeKey(other));
-  assert.equal(c.projection().multi, true);
-  c.selectDefault(api.routeKey(other));
-  assert.equal(c.desired().defaultReasoningEffort, '');
-  c.selectEffort('ultra'); assert.equal(c.desired().defaultReasoningEffort, '');
-  c.selectEffort('high'); await c.save();
-  assert.equal(calls.length, 1); assert.equal(calls[0].revision, 1);
-  assert.deepEqual(plain(calls[0].ops.map((op) => op.path)), [['allowedModels'], ['defaultModel'], ['defaultReasoningEffort'], ['smartModels'], ['fallbackToCurrentModel']]);
-  assert.deepEqual(plain(calls[0].ops.slice(-2).map(op => op.value)), [[], false]);
-  assert.equal(c.draft, undefined); assert.equal(c.failed, false); c.dispose();
+
+test('live official snapshot adds choices and retains invalid selections only for cleanup', async () => {
+  const { controller: ui, own, official } = fixture({ stored: [a, stale], allowed: [a, b, b] });
+  assert.deepEqual(plain(ui.projection().weak), [b]);
+  assert.equal(ui.projection().rows.find((row) => row.key === api.routeKey(stale)).authorized, false);
+  ui.toggleModel(api.routeKey(c));
+  assert.equal(ui.projection().hasDraft, false);
+  ui.toggleModel(api.routeKey(b));
+  await ui.save();
+  assert.equal(own.calls.length, 0);
+  official.update({ value: { enabled: true, allowedModels: [b, c] }, revision: 2 });
+  assert.deepEqual(plain(ui.projection().weak), [c]);
+  ui.toggleModel(api.routeKey(stale));
+  ui.toggleModel(api.routeKey(a));
+  ui.toggleModel(api.routeKey(stale)); // 不允许重新添加已不在白名单的项。
+  assert.deepEqual(plain(ui.projection().desired), [b]);
+  await ui.save();
+  assert.deepEqual(own.calls, [{ ops: [{ op: 'set', path: ['smartModels'], value: [b] }], revision: 1 }]);
+  ui.dispose();
 });
-test('zero selections and default outside selection block save', async () => {
-  const { c, calls } = fixture(); await tick();
-  c.toggleModel(api.routeKey(terra)); await c.save();
-  assert.equal(c.projection().empty, true); assert.equal(calls.length, 0);
-  c.toggleModel(api.routeKey(other)); await c.save();
-  assert.equal(c.projection().missingDefault, true); assert.equal(calls.length, 0); c.dispose();
+
+test('official choice disabled blocks additions but permits removing prior choices', async () => {
+  const { controller: ui, own, official } = fixture({ stored: [a], enabled: false });
+  assert.equal(ui.projection().officialEnabled, false);
+  assert.deepEqual(plain(ui.projection().weak), []);
+  ui.toggleModel(api.routeKey(b));
+  assert.equal(ui.projection().hasDraft, false);
+  official.update({ value: { enabled: true, allowedModels: [a, b] } });
+  ui.toggleModel(api.routeKey(b));
+  official.update({ value: { enabled: false, allowedModels: [a, b] } });
+  assert.equal(ui.projection().offDraft, true);
+  await ui.save();
+  assert.equal(own.calls.length, 0);
+  ui.toggleModel(api.routeKey(b));
+  ui.toggleModel(api.routeKey(a));
+  await ui.save();
+  assert.deepEqual(plain(own.handle.getSnapshot().value.smartModels), []);
+  ui.dispose();
 });
-test('external revision cannot erase even identical draft; explicit review rebases', async () => {
-  const { c, calls, update } = fixture(); await tick();
-  c.selectEffort('low'); const draft = c.draft;
-  update({ revision: 2, value: initial() });
-  assert.equal(c.conflicted, true); assert.equal(c.draft, draft);
-  await c.save(); assert.equal(calls.length, 0);
-  c.rebase(); await c.save(); assert.equal(calls[0].revision, 2); c.dispose();
+
+test('loading, read-only, unsupported and stale official snapshots fail inert', async () => {
+  const { controller: ui, own, official } = fixture({ officialInitial: { status: 'loading' } });
+  assert.equal(ui.projection().loading, true);
+  ui.toggleModel(api.routeKey(a));
+  assert.equal(ui.projection().hasDraft, false);
+  official.update({ status: 'ready' });
+  own.update({ writable: false });
+  ui.toggleModel(api.routeKey(a));
+  assert.equal(ui.projection().hasDraft, false);
+  own.update({ writable: true });
+  ui.toggleModel(api.routeKey(a));
+  official.update({ status: 'unavailable' }); // last accepted value remains present in real configForms
+  assert.deepEqual(plain(ui.projection().desired), [a]);
+  assert.deepEqual(plain(ui.projection().weak), []);
+  await ui.save();
+  official.update({ status: 'ready', value: { allowedModels: [a], enabled: 1 } });
+  assert.equal(ui.projection().officialAvailable, false);
+  await ui.save();
+  assert.equal(own.calls.length, 0);
+  ui.dispose();
 });
-test('rejected and thrown mutations keep draft without automatic retry', async () => {
-  const { c, scope } = fixture(); await tick(); c.selectEffort('low');
-  scope.mutate = async () => ({ ok: false }); await c.save();
-  assert.ok(c.draft); assert.equal(c.failed, true);
-  scope.mutate = async () => { throw Error('offline'); }; await c.save();
-  assert.ok(c.draft); assert.equal(c.saving, false); c.dispose();
+
+test('external own revision retains the draft; rebase is explicit and does not bypass authorization', async () => {
+  const { controller: ui, own, official } = fixture();
+  ui.toggleModel(api.routeKey(a));
+  const draft = ui.draft;
+  own.update({ revision: 2 });
+  assert.equal(ui.projection().conflicted, true);
+  assert.equal(ui.draft, draft);
+  await ui.save();
+  assert.equal(own.calls.length, 0);
+  official.update({ value: { enabled: true, allowedModels: [b] } });
+  ui.rebase();
+  assert.equal(ui.projection().invalid, true);
+  await ui.save();
+  assert.equal(own.calls.length, 0);
+  ui.toggleModel(api.routeKey(a));
+  ui.toggleModel(api.routeKey(b));
+  await ui.save();
+  assert.equal(own.calls[0].revision, 2);
+  ui.dispose();
 });
-test('connection reset keeps draft and ignores late catalog/save settlements', async () => {
-  let resolveCatalog; let resolveSave;
-  const { c, scope } = fixture(() => new Promise((resolve) => { resolveCatalog = resolve; }));
-  const oldCatalog = resolveCatalog;
-  c.toggleModel(api.routeKey(terra)); c.toggleModel(api.routeKey(terra));
-  c.beginDraft().defaultReasoningEffort = '';
-  scope.mutate = () => new Promise((resolve) => { resolveSave = resolve; });
-  const saving = c.save(); const draft = c.draft;
-  c.resetConnection(); oldCatalog(catalog); resolveSave({ ok: true }); await saving; await tick();
-  assert.equal(c.draft, draft); assert.equal(c.conflicted, true);
-  assert.equal(c.groups.length, 0); assert.equal(c.saving, false);
-  resolveCatalog(catalog); await tick(); assert.equal(c.groups.length, 2); c.dispose();
+
+test('conflict merge preserves another window’s unrelated additions and removals', async () => {
+  const { controller: ui, own } = fixture({ stored: [a, b], allowed: [a, b, c, stale] });
+  ui.toggleModel(api.routeKey(a));
+  ui.toggleModel(api.routeKey(c));
+  own.update({ revision: 2, value: { smartModels: [a, stale] } });
+  assert.equal(ui.projection().conflicted, true);
+  ui.rebase();
+  assert.deepEqual(plain(ui.projection().desired), [stale, c]);
+  assert.equal(own.calls.length, 0);
+  await ui.save();
+  assert.deepEqual(own.calls, [{ ops: [{ op: 'set', path: ['smartModels'], value: [stale, c] }], revision: 2 }]);
+  ui.dispose();
 });
-test('read-only does not create draft; partial catalogs keep unavailable removable', async () => {
-  const partial = { ok: true, value: { groups: [], failures: [{ provider: 'offline' }] } };
-  const { c, update } = fixture(async () => partial); await tick();
-  assert.equal(c.projection().catalogPartial, true); assert.equal(c.rows()[0].available, false);
-  update({ writable: false }); c.toggleModel(api.routeKey(terra)); assert.equal(c.draft, undefined);
-  update({ writable: true }); c.toggleModel(api.routeKey(terra)); assert.equal(c.desired().allowedModels.length, 0); c.dispose();
+
+test('refusal and transport error retain the draft without retries; discard restores accepted values', async () => {
+  const { controller: ui, own } = fixture();
+  const failCases = [() => false, () => { throw Error('offline'); }];
+  ui.toggleModel(api.routeKey(a));
+  let attempts = 0;
+  for (const failure of failCases) {
+    own.handle.mutate = async () => { attempts++; return failure(); };
+    await ui.save();
+    assert.equal(ui.projection().failed, true);
+    assert.equal(ui.projection().dirty, true);
+    assert.equal(ui.projection().saving, false);
+  }
+  assert.equal(attempts, 2);
+  ui.discard();
+  assert.equal(ui.projection().hasDraft, false);
+  assert.equal(ui.projection().failed, false);
+  assert.deepEqual(plain(ui.projection().desired), []);
+  ui.dispose();
 });
-test('catalog failures are caught and retry/disposal suppress stale responses', async () => {
-  const { c } = fixture(async () => { throw Error('catalog offline'); }); await tick();
-  assert.equal(c.catalogStatus, 'error');
-  c.ctx.remote.session.modelCatalog = async () => catalog; await c.loadCatalog();
-  assert.equal(c.catalogStatus, 'ready'); c.dispose();
-  assert.equal(c.disposed, true);
+
+test('a simultaneous official edit may make an accepted selection stale, but cannot authorize it again', async () => {
+  const { controller, own, official } = fixture();
+  controller.dispose();
+  const mount = mounted(own.handle, official.handle);
+  const ui = mount.registrations[0].options.inject().controller;
+  const card = () => render(mount, officialSubject);
+  const commit = own.handle.mutate;
+  let finish;
+  own.handle.mutate = (ops, revision) => new Promise((resolve) => { finish = () => resolve(commit(ops, revision)); });
+  ui.toggleModel(api.routeKey(a));
+  const saving = ui.save();
+  const status = () => nodes(card(), 'span').find(el => el.props.role === 'status');
+  assert.match(text(status()), /保存中/);
+  // Namespace fences are independent; a concurrent official update never joins the add-on write.
+  official.update({ value: { enabled: true, allowedModels: [b] } });
+  finish();
+  await saving;
+  assert.equal(ui.projection().saved, true);
+  assert.equal(ui.projection().invalid, true);
+  assert.equal(ui.projection().rows.find((row) => row.key === api.routeKey(a)).authorized, false);
+  assert.deepEqual(plain(ui.projection().weak), [b]);
+  assert.match(text(status()), /已保存，但官方白名单已变更/);
+  assert.doesNotMatch(text(card()), /请先移除已不在上方白名单/);
+  mount.dispose();
+});
+
+test('reattachment invalidates stale save settlement and does not submit twice', async () => {
+  const { controller: ui, own } = fixture();
+  let finish;
+  let attempts = 0;
+  own.handle.mutate = () => { attempts++; return new Promise((resolve) => { finish = resolve; }); };
+  ui.toggleModel(api.routeKey(a));
+  const save = ui.save();
+  await ui.save();
+  ui.toggleModel(api.routeKey(b));
+  ui.resetConnection();
+  finish(true);
+  await save;
+  assert.equal(attempts, 1);
+  assert.equal(ui.projection().conflicted, true);
+  assert.equal(ui.projection().saved, false);
+  assert.deepEqual(plain(ui.projection().desired), [a]);
+  ui.dispose();
 });

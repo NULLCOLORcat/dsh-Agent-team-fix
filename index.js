@@ -1,51 +1,28 @@
 import z from '@deepseek-ai/schemastery';
-import { DEFAULT_POLICY } from './routing.js';
-import { installRouting } from './runtime.js';
+import { installAdvice } from './runtime.js';
 
 export const name = 'team-terra-ultra';
-// 顶层只依赖设置服务。路由依赖另置子作用域，缺少 Team 服务时设置页仍可显示等待状态。
-export const inject = ['settings'];
-const routingServices = ['agents', 'agentTeams', 'subagents', 'llm', 'tools'];
-const warning = 'team-terra-ultra: unsupported Team routing API；队友模型路由已停用，等待更新。';
 const ModelRoute = z.object({ provider: z.string().min(1).required(), model: z.string().min(1).required() });
 
-// volatile 设置经 Host configForms 持久化；新操作读取新值，已创建成员保留原路由。
+// 保留设置的持久化入口；Schemastery 可接收旧配置的额外字段，运行时只读 smartModels。
 export const Config = z.object({
-  allowedModels: z.array(ModelRoute).min(1).default(DEFAULT_POLICY.allowedModels.map((route) => ({ ...route }))).volatile(),
-  defaultModel: ModelRoute.default({ ...DEFAULT_POLICY.defaultModel }).volatile(),
-  defaultReasoningEffort: z.string().default(DEFAULT_POLICY.defaultReasoningEffort).volatile(),
   smartModels: z.array(ModelRoute).default([]).volatile(),
-  fallbackToCurrentModel: z.boolean().default(false).volatile(),
 });
 
-/** 保持原 entry ID 和设置命名空间；升级不搬迁用户配置或历史会话。 */
+/** 用两个独立子作用域等待可选服务；任一功能缺失不阻止原生 Host 或另一侧工作。 */
 export function apply(ctx, config) {
-  let status = 'waiting'; // 此激活独享；disabled 只能由插件显式重新加载清除。
-  try { ctx.effect(() => ctx.settings.configure({ auto: false })); }
-  catch { throw new Error('team-terra-ultra: settings API unavailable; teammate routing not installed.'); }
-  ctx.inject(['connection'], function routingStatus(scope) {
-    // rc.5 Connection 负责 owner 身份和 GET 路由生命周期；只返回枚举，不返回错误或配置。
-    try {
-      scope.effect(() => scope.connection.fetch.register({
-        path: '/api/team-terra-ultra/status', methods: ['GET'], requestBody: 'buffered',
-        fetch: () => Response.json({ status }, { headers: { 'cache-control': 'no-store' } }),
-      }));
-    } catch { throw new Error('team-terra-ultra: read-only routing status unavailable.'); }
-  });
-  ctx.inject(routingServices, async function teammateRouting(scope) {
-    if (status === 'disabled') return;
-    let live = true;
-    scope.effect(() => () => { live = false; if (status !== 'disabled') status = 'waiting'; });
-    try {
-      // 动态导入失败不会破坏同步 Config 导出或阻止诊断卡注册。
-      const { ToolExecutionPipeline } = await import('@deepseek-ai/dsh-tools/pipeline');
-      if (!live) return;
-      installRouting(scope, config, ToolExecutionPipeline, () => { if (live) status = 'disabled'; });
-      if (status !== 'disabled') status = 'ready';
-    } catch {
-      if (!live) return;
-      status = 'disabled';
-      try { await scope.logger?.warn?.(warning); } catch { /* 日志故障不应影响 Host */ }
-    }
-  });
+  try {
+    ctx.inject(['settings'], (scope) => {
+      // 展示策略归属外层插件实例；注销则跟随依赖 settings 的子作用域。
+      try { scope.effect(() => scope.settings.configure({ auto: false }, ctx.fiber)); }
+      catch { /* 设置服务不可用时不影响动态建议。 */ }
+    });
+  } catch { /* 兼容缺少注入能力的 Host。 */ }
+
+  try {
+    ctx.inject(['systemPrompt', 'sessionProjections', 'tools'], (scope) => {
+      try { installAdvice(scope, config); }
+      catch { /* 注册失败时不影响其他提示和原生工具。 */ }
+    });
+  } catch { /* 可选扩展不可用时静默。 */ }
 }

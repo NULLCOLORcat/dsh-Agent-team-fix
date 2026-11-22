@@ -1,429 +1,161 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_POLICY, readPolicy, selectRoute, resolveRoute } from './routing.js';
-import { installRouting } from './runtime.js';
+import { test } from 'node:test';
+import { difficultyCandidates } from './routing.js';
+import { installAdvice } from './runtime.js';
 
-const terra = { provider: 'openai-codex', model: 'gpt-6.1-terra' };
-const luna = { provider: 'openai-codex', model: 'gpt-6-luna' };
-const plain = { provider: 'other', model: 'plain' };
-const multi = () => ({ allowedModels: [terra, luna, plain], defaultModel: terra, defaultReasoningEffort: 'ultra' });
-const args = (name, extra = {}) => ({ name, description: 'test', prompt: 'test only', ...extra });
-const selection = (model, effort) => ({ ...model, ...(effort === undefined ? {} : { reasoningEffort: effort }) });
-const metadata = (provider, model) => {
-  if (model === 'missing') throw new Error('Provider model unavailable');
-  return { provider, id: model, name: model, ...(model === 'plain' ? {} : { reasoning: {
-    efforts: (model === terra.model ? ['low', 'ultra'] : ['low', 'high']).map((id) => ({ id, name: id })),
-    defaultEffort: 'low',
-  } }) };
-};
-function harness(initial = multi(), beforeInstall = () => {}) {
-  let current = initial;
-  const events = new Map(); const tools = new Map(); const selections = new WeakMap();
-  const roots = new WeakMap(); const enabled = new WeakSet(); const agents = new Map();
-  const addRoot = (id, on) => {
-    const agent = { id, session: { header: { id, origin: 'user' } } };
-    agents.set(id, agent); roots.set(agent, agent);
-    if (on) enabled.add(agent);
-    return agent;
-  };
-  const lead = addRoot('lead', true);
-  const otherLead = addRoot('other-lead', true);
-  const regular = addRoot('regular', false);
-  const calls = []; const created = []; const prepared = []; const warnings = [];
-  let nextId = 0;
-  const llm = {
-    resolveModelInfo: async (provider, model) => metadata(provider, model),
-    resolveCallConfig: async (route) => {
-      const info = metadata(route.provider, route.model);
-      const effort = route.reasoningEffort ?? info.reasoning?.defaultEffort;
-      if (effort && !info.reasoning?.efforts.some((item) => item.id === effort)) throw new Error('Unsupported effort');
-      return selection(route, effort);
-    },
-  };
-  async function create(parent, name, context = 'fresh', history = false, signal) {
-    const id = `child-${++nextId}`;
-    const agent = { id, name, session: { header: { id, origin: 'subagent', parentSession: parent.id },
-      inheritedEventCount: context === 'fork' ? 100 : 0 }, model: { select: (route) => selections.set(agent, route) } };
-    // 原生子代理偏好可能不同于主窗口；记录其初值以区分主动绑定和偶然继承。
-    if (native.preference && !history) selections.set(agent, { ...native.preference });
-    // 模拟 rc.5 顺序：钩子执行时子 Agent 尚未加入 subagent 运行注册表。
-    await Promise.resolve(); await Promise.resolve();
-    await events.get('agent/created')({ agent, source: history ? 'resume' : 'startup', signal });
-    roots.set(agent, roots.get(parent)); agents.set(id, agent); created.push(agent);
-    return agent;
-  }
-  const native = { execute: async (request, exec) => {
-    calls.push({ name: exec.name, args: request });
-    if (!/^[a-z][a-z0-9-]*$/.test(request.name)) throw new Error('Invalid native teammate name');
-    await create(exec.agent, request.name, exec.name === 'subagent_fork' ? 'fork' : 'fresh', false, exec.signal);
-    return { kind: 'activation', name: request.name };
-  } };
-  const ctx = { llm, agents: { get: (id) => agents.get(id) },
-    agentTeams: { isEnabled: (agent) => enabled.has(agent) }, subagents: { rootOf(agent) {
-      if (!roots.has(agent)) throw Object.assign(new Error('agent has no active runtime owner'), { code: 'UNAUTHORIZED' });
-      return roots.get(agent);
-    } },
-    logger: { warn: (message) => warnings.push(message) }, on: (event, fn) => events.set(event, fn),
-    tools: {
-      register: (definition, options) => tools.set(definition.name, { ...definition, when: options.when }),
-      executable: (name, _agent, set) => ['subagent', 'subagent_fork'].includes(name) && (!set || set.has(name)) ? native : undefined,
-    },
-  };
-  class MockPipeline {
-    prepare(exec) {
-      prepared.push(exec);
-      return exec.toolSet?.deny ? { kind: 'final-result', exec, result: { isError: true, error: { message: 'denied by native guard' } } }
-        : { kind: 'dispatch', exec };
-    }
-    async dispatch(exec) {
-      const tool = ctx.tools.executable(exec.name, exec.agent, exec.toolSet);
-      return { result: { value: await tool.execute(exec.arguments, exec) } };
-    }
-    complete(_exec, outcome) { return outcome.result; }
-  }
-  const config = Object.fromEntries(Object.keys(DEFAULT_POLICY).map((key) => [key, { get: () => current[key] }]));
-  const disabled = [];
-  beforeInstall(ctx, MockPipeline);
-  installRouting(ctx, config, MockPipeline, message => disabled.push(message));
-  return { ctx, llm, events, tools, lead, otherLead, regular, enabled, selections, calls, created, create, native, prepared, warnings, disabled,
-    setPolicy: (value) => { current = value; },
-    invoke: (name, request, agent = lead, signal = new AbortController().signal, toolSet) => tools.get(name).execute(request,
-      { agent, signal, toolSet, callId: 'outer', rootCallId: 'root', token: 'outer-token', deferContext() {} }),
-    request: (agent, route) => events.get('agent/request')({ agent }, async () => route),
-  };
-}
-const spawn = 'spawn_teammate_with_model';
-const list = 'list_teammate_models';
+const strong = Object.freeze({ provider: 'p-one', model: 'shared-model' });
+const weak = Object.freeze({ provider: 'p-two', model: 'shared-model' });
+const inactive = Object.freeze({ provider: 'other', model: 'private-unapproved-model' });
+const nativePolicy = Object.freeze([weak, strong]);
+const policyKey = 'subagentModelSelectionPolicy';
+const routeAware = Object.freeze({ parameters: { properties: { provider: { type: 'string' }, model: { type: 'string' } } } });
+const nativeList = Object.freeze({});
 
-test('policy defaults, volatile snapshots and malformed/duplicate/default rejection', () => {
-  assert.deepEqual(readPolicy(), DEFAULT_POLICY);
-  const original = multi(); const snapshot = readPolicy(original); original.allowedModels.length = 0;
-  assert.equal(snapshot.allowedModels.length, 3);
-  assert.throws(() => readPolicy({ ...multi(), allowedModels: [] }), /at least one/);
-  assert.throws(() => readPolicy({ ...multi(), allowedModels: [terra, terra] }), /Duplicate/);
-  assert.throws(() => readPolicy({ ...multi(), defaultModel: { provider: 'x', model: 'y' } }), /Default/);
-  assert.throws(() => readPolicy({ ...multi(), allowedModels: [{ provider: '', model: 'x' }] }), /non-empty/);
-});
-
-test('single model exposes no selection tools; native fresh and fork fixed to Terra/Ultra', async () => {
-  const h = harness(readPolicy());
-  assert.equal(h.tools.get(spawn).when({ agent: h.lead }), false);
-  assert.equal(h.tools.get(list).when({ agent: h.lead }), false);
-  for (const context of ['fresh', 'fork']) {
-    const agent = await h.create(h.lead, context, context);
-    assert.deepEqual(h.selections.get(agent), selection(terra, 'ultra'));
-  }
-  await assert.rejects(h.invoke(spawn, args('blocked', luna)), /multiple/);
-  assert.throws(() => selectRoute(readPolicy(), { reasoning_effort: 'low' }), /Single-model/);
-});
-
-test('new and reopened root sessions, ordinary subagents, and restored members are untouched', async () => {
-  const h = harness();
-  const created = h.events.get('agent/created');
-  const resumed = await h.create(h.lead, 'resumed', 'fresh', true);
-  const ordinary = await h.create(h.regular, 'ordinary');
-  h.ctx.agents.get = () => assert.fail('root or resumed session must not query Team membership');
-  await created({ agent: h.regular, source: 'startup' });
-  await created({ agent: h.regular, source: 'resume' });
-  await created({ agent: { session: { header: { origin: 'user', parentSession: h.lead.id } } }, source: 'startup' });
-  await created({ agent: resumed, source: 'resume' });
-  for (const agent of [h.lead, h.regular, resumed, ordinary]) assert.equal(h.selections.has(agent), false);
-  await h.request(resumed, selection(luna, 'high'));
-});
-
-test('unsupported Host APIs leave the global conversation lifecycle unmodified', () => {
-  let warning;
-  installRouting({ agentTeams: {}, logger: { warn: (message) => { warning = message; } },
-    on: () => assert.fail('must not install global hooks') }, undefined, undefined);
-  assert.match(warning, /unsupported Team routing API/);
-});
-
-test('multi discovery returns whitelist/default and exact model effort metadata', async () => {
-  const h = harness();
-  assert.equal(h.tools.get(list).when({ agent: h.lead }), true);
-  assert.deepEqual(JSON.parse(await h.invoke(list, {})).allowedModels, multi().allowedModels);
-  const info = JSON.parse(await h.invoke(list, luna));
-  assert.deepEqual(info.reasoningEfforts.map((item) => item.id), ['low', 'high']);
-  await assert.rejects(h.invoke(list, { provider: 'other', model: 'forbidden' }), /not allowed/);
-  await assert.rejects(h.invoke(list, { model: luna.model }), /together/);
-});
-
-test('multi explicit effort and configurable omitted default; native arguments/output preserved', async () => {
-  const h = harness();
-  const result = await h.invoke(spawn, args('chosen', { ...luna, context: 'fork', reasoning_effort: 'high' }));
-  assert.deepEqual(h.selections.get(h.created[0]), selection(luna, 'high'));
-  assert.deepEqual(result.selected_route, selection(luna, 'high'));
-  assert.equal(result.kind, 'activation');
-  assert.equal(result.name, 'chosen');
-  assert.deepEqual(h.calls[0], { name: 'subagent_fork', args: args('chosen') });
-  assert.equal(h.prepared[0].parent, 'outer-token');
-  assert.equal(h.prepared[0].rootCallId, 'root');
-  assert.equal(h.prepared[0].agent, h.lead);
-  await h.invoke(spawn, args('default'));
-  assert.deepEqual(h.selections.get(h.created[1]), selection(terra, 'ultra'));
-  h.setPolicy({ ...multi(), defaultModel: luna, defaultReasoningEffort: 'high' });
-  const direct = await h.create(h.lead, 'direct');
-  assert.deepEqual(h.selections.get(direct), selection(luna, 'high'));
-});
-
-test('different model gets its own advertised default, non-reasoning model clears inherited effort', async () => {
-  const h = harness();
-  await h.invoke(spawn, args('different', luna));
-  assert.deepEqual(h.selections.get(h.created[0]), selection(luna, 'low'));
-  await h.invoke(spawn, args('plain', plain));
-  assert.deepEqual(h.selections.get(h.created[1]), plain);
-  h.setPolicy({ ...multi(), defaultReasoningEffort: '' });
-  await h.invoke(spawn, args('empty-default'));
-  assert.deepEqual(h.selections.get(h.created[2]), selection(terra, 'low'));
-});
-
-test('forbidden model, invalid effort, unavailable model and cancellation fail before native creation', async () => {
-  const h = harness();
-  await assert.rejects(h.invoke(spawn, args('forbidden', { provider: 'x', model: 'y' })), /not allowed/);
-  await assert.rejects(h.invoke(spawn, args('bad-effort', { ...luna, reasoning_effort: 'ultra' })), /does not support/);
-  await assert.rejects(h.invoke(spawn, args('empty-effort', { ...luna, reasoning_effort: '' })), /non-empty/);
-  await assert.rejects(h.invoke(spawn, args('bad-plain', { ...plain, reasoning_effort: 'low' })), /does not support/);
-  h.setPolicy({ ...multi(), allowedModels: [...multi().allowedModels, { provider: 'other', model: 'missing' }] });
-  await assert.rejects(h.invoke(spawn, args('unavailable', { provider: 'other', model: 'missing' })), /unavailable/);
-  const abort = new AbortController(); abort.abort();
-  await assert.rejects(h.invoke(spawn, args('cancelled'), h.lead, abort.signal), /abort/i);
-  assert.equal(h.calls.length, 0);
-});
-
-test('non-lead cannot inspect/create even when calling stale tool directly', async () => {
-  const h = harness(); const agent = await h.create(h.lead, 'member');
-  assert.equal(h.tools.get(spawn).when({ agent }), false);
-  assert.equal(h.tools.get(spawn).when({ agent: h.regular }), false);
-  await assert.rejects(h.invoke(list, {}, agent), /Only the Lead/);
-  await assert.rejects(h.invoke(spawn, args('bad'), agent), /Only the Lead/);
-  await assert.rejects(h.invoke(spawn, args('not-team'), h.regular), /Only the Lead/);
-  assert.equal(h.calls.length, 0);
-});
-
-test('concurrent fresh/fork creates and different Team roots never share routes', async () => {
-  const h = harness();
-  const results = await Promise.all([
-    h.invoke(spawn, args('same-name', { ...luna, reasoning_effort: 'high' })),
-    h.invoke(spawn, args('same-name', { ...plain, context: 'fork' }), h.otherLead),
-    h.invoke(spawn, args('default')),
-  ]);
-  assert.deepEqual(results.map((result) => result.selected_route), [selection(luna, 'high'), plain, selection(terra, 'ultra')]);
-  assert.deepEqual(h.created.map((agent) => h.selections.get(agent)), results.map((result) => result.selected_route));
-});
-
-test('request guard rejects later override and settings changes do not reroute existing members', async () => {
-  const h = harness(); await h.invoke(spawn, args('stable', { ...luna, reasoning_effort: 'high' }));
-  const agent = h.created[0]; const expected = selection(luna, 'high');
-  h.setPolicy(readPolicy());
-  assert.deepEqual(await h.request(agent, expected), expected);
-  await assert.rejects(h.request(agent, selection(terra, 'ultra')), /overridden/);
-  await assert.rejects(h.request(agent, selection(luna, 'low')), /overridden/);
-  assert.equal(h.tools.get(spawn).when({ agent: h.lead }), false);
-});
-
-test('native validation remains authoritative; missing native tool and missing route binding refuse', async () => {
-  const h = harness();
-  await assert.rejects(h.invoke(spawn, args('invalid name')), /Invalid native/);
-  await assert.rejects(h.invoke(spawn, args('invalid-context', { context: 'other' })), /Native delegation tool is not admitted/);
-  await assert.rejects(h.invoke(spawn, args('no-native'), h.lead, undefined, new Set()), /Native subagent tool is not admitted/);
-  h.native.execute = async () => ({ kind: 'activation', name: 'no-binding' });
-  await assert.rejects(h.invoke(spawn, args('no-binding')), /did not bind/);
-});
-
-test('native pipeline denial is propagated without delegation', async () => {
-  const h = harness();
-  const toolSet = Object.assign(new Set(['subagent']), { deny: true });
-  await assert.rejects(h.invoke(spawn, args('guarded'), h.lead, undefined, toolSet), /denied by native guard/);
-  assert.equal(h.prepared[0].toolSet, toolSet);
-  assert.equal(h.calls.length, 0);
-  assert.equal(h.created.length, 0);
-});
-
-const hard = 'spawn_hard_teammate';
-
-test('migration keeps daily settings; hard policy copies, validates and defaults to opt-out', () => {
-  const old = multi(); const policy = readPolicy(old);
-  assert.deepEqual(policy, { ...old, smartModels: [], fallbackToCurrentModel: false });
-  const source = { ...old, smartModels: [{ ...luna }] };
-  const snapshot = readPolicy(source); source.smartModels[0].model = 'changed';
-  assert.deepEqual(snapshot.smartModels, [luna]);
-  for (const invalid of [null, {}, [luna, luna], [{ model: 'orphan' }]]) assert.throws(() => readPolicy({ ...old, smartModels: invalid }));
-  for (const invalid of ['false', 1, null]) assert.throws(() => readPolicy({ ...old, fallbackToCurrentModel: invalid }), /boolean/);
-});
-
-test('one daily model: discovery and explicit smart choice work without widening daily policy', async () => {
-  const h = harness({ ...readPolicy(), smartModels: [luna, plain] });
-  assert.equal(h.tools.get(hard).when({ agent: h.lead }), true);
-  assert.equal(h.tools.get(list).when({ agent: h.lead }), true);
-  assert.equal(h.tools.get(spawn).when({ agent: h.lead }), false);
-  const guide = JSON.parse(await h.invoke(list, {}));
-  assert.deepEqual(guide.smartModels, [luna, plain]);
-  assert.match(guide.hardTaskGuidance, /unresolved.*quota/);
-  assert.deepEqual(JSON.parse(await h.invoke(list, luna)).reasoningEfforts.map(e => e.id), ['low', 'high']);
-  await assert.rejects(h.invoke(hard, args('unspecified')), /provider and model/);
-  await assert.rejects(h.invoke(hard, args('daily', terra)), /not in smartModels/);
-  await assert.rejects(h.invoke(hard, args('effort', { ...plain, reasoning_effort: 'high' })), /does not support/);
-  assert.equal(h.created.length, 0);
-  const jobs = await Promise.all([h.invoke(hard, args('smart', { ...luna, reasoning_effort: 'high' })),
-    h.invoke(hard, args('fork', { ...plain, context: 'fork' })), h.invoke(hard, args('default-effort', luna))]);
-  assert.deepEqual(jobs.map(job => job.selected_route), [selection(luna, 'high'), plain, selection(luna, 'low')]);
-  for (const job of jobs) assert.deepEqual(h.selections.get(h.created.find(a => a.name === job.name)), job.selected_route);
-  const member = await h.create(h.lead, 'native');
-  assert.deepEqual(h.selections.get(member), selection(terra, 'ultra'));
-  assert.equal(h.tools.get(hard).when({ agent: member }), false);
-  await assert.rejects(h.invoke(hard, args('stale', luna), member), /Only the Lead/);
-  h.setPolicy(multi());
-  assert.equal(h.tools.get(hard).when({ agent: h.lead }), false);
-  await assert.rejects(h.invoke(hard, args('disabled', luna)), /disabled/);
-});
-
-test('fallback outranks smart and native preferences; binds each root snapshot for fresh/fork', async () => {
-  const h = harness({ ...readPolicy(), smartModels: [terra], fallbackToCurrentModel: true });
-  h.native.preference = selection(terra, 'ultra');
-  const current = selection(luna, 'high');
-  h.lead.model = { current: () => current }; h.otherLead.model = { current: () => plain };
-  const jobs = [h.invoke(hard, args('fresh', { ...terra, reasoning_effort: 'ultra' })),
-    h.invoke(hard, args('fork', { context: 'fork' }), h.otherLead)];
-  current.reasoningEffort = 'low';
-  assert.deepEqual((await Promise.all(jobs)).map(job => job.selected_route), [selection(luna, 'high'), plain]);
-  for (const child of h.created) {
-    const expected = child.name === 'fresh' ? selection(luna, 'high') : plain;
-    assert.deepEqual(h.selections.get(child), expected);
-    await assert.rejects(h.request(child, h.native.preference), /overridden/);
-  }
-  assert.deepEqual(h.calls.map(call => call.args), [args('fresh'), args('fork')]);
-  assert.equal(h.selections.has(await h.create(h.lead, 'resume', 'fork', true)), false);
-  h.setPolicy({ ...readPolicy(), fallbackToCurrentModel: true });
-  assert.equal(h.tools.get(hard).when({ agent: h.lead }), true);
-  assert.deepEqual((await h.invoke(hard, args('fallback-only'))).selected_route, selection(luna, 'low'));
-  h.lead.model = { current: () => undefined };
-  await assert.rejects(h.invoke(hard, args('no-current')), /Current main-window model/);
-});
-
-test('hard route obeys native admission, guard denial, cancellation and binding checks', async () => {
-  const h = harness({ ...multi(), smartModels: [plain] });
-  await assert.rejects(h.invoke(hard, args('no-fork', { ...plain, context: 'fork' }), h.lead, undefined, new Set(['subagent'])), /not admitted/);
-  await assert.rejects(h.invoke(hard, args('denied', plain), h.lead, undefined, Object.assign(new Set(['subagent']), { deny: true })), /denied by native guard/);
-  const abort = new AbortController(); abort.abort();
-  await assert.rejects(h.invoke(hard, args('abort', plain), h.lead, abort.signal), /abort/i);
-  assert.equal(h.calls.length, 0);
-  h.native.execute = async () => ({ name: 'missing' });
-  await assert.rejects(h.invoke(hard, args('missing', plain)), /did not bind/);
-});
-
-function assertDisabledOnce(h) {
-  assert.equal(h.disabled.length, 1);
-  assert.match(h.disabled[0], /unsupported Team routing API.*等待更新/);
-  assert.deepEqual(h.warnings, h.disabled);
-  assert.doesNotMatch(h.disabled[0], /PRIVATE/);
+function agent(session = {}) {
+  return Object.freeze({ session: Object.freeze(session) });
 }
 
-test('all early API gaps disable before registration, and failed registration leaves inert hooks/tools', async () => {
-  for (const remove of [ctx => delete ctx.on, ctx => delete ctx.tools.register,
-    ctx => delete ctx.llm.resolveModelInfo, ctx => delete ctx.llm.resolveCallConfig]) {
-    const h = harness(multi(), remove);
-    assertDisabledOnce(h); assert.equal(h.events.size + h.tools.size, 0);
-  }
-  const h = harness(multi(), ctx => {
-    const save = ctx.tools.register;
-    ctx.tools.register = (...params) => { save(...params); if (params[0].name === spawn) throw Error('PRIVATE registry data'); };
+/** Fake the three read-only runtime surfaces. An extra/mutating call must throw or fail the captured assertions. */
+function fixture({ config = { smartModels: [inactive, strong] }, policy = new Map() } = {}) {
+  const tools = new Map([['subagent', routeAware], ['list_subagent_models', nativeList]]);
+  const reads = [];
+  let fact;
+  const ctx = Object.freeze({
+    tools: Object.freeze({ executable(name, scope, toolSet) {
+      reads.push(['tool', name, scope, toolSet]);
+      const registry = toolSet === undefined ? tools : toolSet;
+      return registry.get(name);
+    } }),
+    sessionProjections: Object.freeze({ stateOf(session, key) {
+      reads.push(['projection', session, key]);
+      return policy.get(session);
+    } }),
+    systemPrompt: Object.freeze({ context(value) {
+      assert.equal(fact, undefined, 'only one contribution must be registered');
+      fact = value;
+    } }),
   });
-  assert.equal(h.tools.get(list).when({ agent: h.lead }), false);
-  await assert.rejects(h.invoke(spawn, args('stale')), /等待更新/);
-  assert.equal(h.selections.has(await h.create(h.lead, 'ordinary')), false);
-  assert.equal(h.selections.has(await h.create(h.lead, 'history', 'fresh', true)), false);
-  assertDisabledOnce(h);
+  installAdvice(ctx, config);
+  return { fact, reads, tools, policy, render: (a, extra) => fact.text({ agent: a, scope: a, ...extra }) };
+}
+
+function renderedGroups(text) {
+  return text.trim().split('\n').slice(1, 3).map(line => JSON.parse(line.match(/\[.*\](?=\.$)/)[0]));
+}
+
+test('groups exact native pairs, preserve native order, and expose only detached route ids', () => {
+  const otherStrong = Object.freeze({ provider: 'p-three', model: 'another' });
+  const withExtras = Object.freeze({ ...strong, reasoningEffort: 'not-a-route-field' });
+  const allow = Object.freeze([weak, withExtras, otherStrong]);
+  const smart = Object.freeze([otherStrong, inactive, strong, strong]);
+  const out = difficultyCandidates(allow, smart);
+  assert.deepEqual(out, { difficult: [strong, otherStrong], routine: [weak] });
+  out.difficult[0].model = 'different';
+  assert.equal(withExtras.model, 'shared-model');
+  assert.equal(difficultyCandidates(nativePolicy, []), undefined);
+  assert.equal(difficultyCandidates(nativePolicy, [inactive]), undefined);
+  assert.deepEqual(difficultyCandidates([strong], [strong]), { difficult: [strong], routine: [] });
 });
 
-test('late method removal hides all tools but keeps existing guard and next error identity', async () => {
-  const h = harness(); const member = await h.create(h.lead, 'bound');
-  delete h.ctx.subagents.rootOf;
-  for (const tool of h.tools.values()) assert.equal(tool.when({ agent: h.lead }), false);
-  await assert.rejects(h.invoke(list, {}), /等待更新/);
-  await assert.rejects(h.request(member, plain), /overridden/);
-  assert.deepEqual(await h.request(member, selection(terra, 'ultra')), selection(terra, 'ultra'));
-  const err = new TypeError('PRIVATE downstream is not a function'); let count = 0;
-  await assert.rejects(h.events.get('agent/request')({ agent: member }, () => { count++; throw err; }), e => e === err);
-  assert.equal(count, 1); assertDisabledOnce(h);
-  assert.equal(harness().warnings.length, 0);
-});
-
-test('membership implementation failures, async replacements and nonboolean flags fail closed', async () => {
-  for (const alter of [ctx => { ctx.subagents.rootOf = () => { throw Error('PRIVATE membership failure'); }; },
-    ctx => { ctx.subagents.rootOf = async () => { throw Error('PRIVATE asynchronous rejection'); }; },
-    ctx => { ctx.agentTeams.isEnabled = () => 'yes'; }]) {
-    const h = harness(); alter(h.ctx);
-    assert.equal(h.tools.get(list).when({ agent: h.lead }), false);
-    assert.equal(h.selections.has(await h.create(h.lead, 'ordinary')), false);
-    assertDisabledOnce(h);
+test('empty, malformed and duplicate native policy shapes are not authority', () => {
+  for (const policy of [undefined, null, {}, [], [strong, {}], [strong, strong], [{ ...strong, model: '' }]]) {
+    assert.equal(difficultyCandidates(policy, [strong]), undefined);
   }
-  const h = harness(); h.ctx.agentTeams.isEnabled = () => { throw Object.assign(Error('no access'), { code: 'FORBIDDEN' }); };
-  assert.equal(h.tools.get(list).when({ agent: h.lead }), false); assert.equal(h.warnings.length, 0);
+  assert.equal(difficultyCandidates(nativePolicy, null), undefined);
+  assert.equal(difficultyCandidates(nativePolicy, [strong, { ...weak, provider: '' }]), undefined);
 });
 
-test('broken notification channels cannot prevent disabling or leak unhandled rejections', async () => {
-  for (const asyncLogger of [true, false]) {
-    let logged = 0, notified = 0;
-    const fail = asyncMode => { if (asyncMode) return Promise.reject(Error('PRIVATE')); throw Error('PRIVATE'); };
-    installRouting({ logger: { warn() { logged++; return fail(asyncLogger); } } }, undefined, undefined,
-      () => { notified++; return fail(!asyncLogger); });
-    await new Promise(resolve => setImmediate(resolve));
-    assert.deepEqual([logged, notified], [1, 1]);
-  }
+test('one optional dynamic context reads only the owning session projection and scoped tool definitions', () => {
+  const a = agent({ id: 'valid' });
+  const f = fixture({ policy: new Map([[a.session, nativePolicy]]) });
+  assert.equal(f.fact.name, 'team-terra-ultra:difficulty-candidates');
+  assert.equal(f.fact.interpolate, false);
+  assert.notEqual(f.fact.required, true);
+  assert.equal(f.fact.text({}), '');
+  assert.equal(f.render(a, { scope: agent() }), '');
+  assert.deepEqual(f.reads, []);
+
+  const result = f.render(a);
+  assert.deepEqual(renderedGroups(result), [[strong], [weak]]);
+  assert.match(result, /advisory/);
+  assert.match(result, /native list_subagent_models/);
+  assert.match(result, /native delegation tools make the final admission decision/i);
+  assert.match(result, /may not be available in the live catalog/);
+  assert.ok(!result.includes(inactive.model));
+  assert.deepEqual(f.reads, [['tool', 'subagent', a, undefined], ['projection', a.session, policyKey], ['tool', 'list_subagent_models', a, undefined]]);
 });
 
-test('resume bypasses missing header; malformed ordinary startup degrades without breaking creation', async () => {
-  const h = harness(); const created = h.events.get('agent/created');
-  await created({ source: 'resume' }); assert.equal(h.disabled.length, 0);
-  await created({ agent: {}, source: 'startup' }); await created(undefined);
-  assert.equal(h.tools.get(list).when({}), false); assertDisabledOnce(h);
+test('older sessions without a snapshot and neighboring sessions do not inherit or guess authority', () => {
+  const current = agent({ id: 'new' });
+  const old = agent({ id: 'legacy' });
+  const unregistered = agent({ id: 'projection-missing' });
+  const nested = agent({ id: 'nested-subagent' });
+  const f = fixture({ policy: new Map([[current.session, nativePolicy], [old.session, null], [nested.session, [weak]]]) });
+  assert.deepEqual(renderedGroups(f.render(current)), [[strong], [weak]]);
+  assert.equal(f.render(old, { modelSelection: strong }), '');
+  assert.equal(f.render(unregistered, { modelSelection: strong }), '');
+  assert.equal(f.render(nested), '', 'the only user-designated route belongs to the other session');
+  f.policy.set(nested.session, [strong]);
+  assert.deepEqual(renderedGroups(f.render(nested)), [[strong], []]);
+  assert.deepEqual(renderedGroups(f.render(current)), [[strong], [weak]]);
 });
 
-test('mid-flight structural fault refuses explicit creation without fallback or replay', async () => {
-  const h = harness(); let attempts = 0;
-  h.native.execute = async () => {
-    attempts++;
-    await h.events.get('agent/created')({ source: 'startup', agent: { session: { header: {
-      origin: 'subagent', parentSession: h.lead.id, id: 'PRIVATE child' } } } });
-    assert.fail('explicit creation must not proceed without model.select');
-  };
-  await assert.rejects(h.invoke(spawn, args('explicit', luna)), /等待更新/);
-  await assert.rejects(h.invoke(spawn, args('stale', plain)), /等待更新/);
-  assert.equal(attempts, 1); assertDisabledOnce(h);
+test('scope admission controls visibility; do not assume support from names, tool catalog or Team state', () => {
+  const a = agent();
+  const f = fixture({ policy: new Map([[a.session, nativePolicy]]) });
+  const noStepRoutes = new Map([['list_subagent_models', nativeList]]);
+  assert.equal(f.render(a, { toolSet: noStepRoutes }), '');
+  assert.ok(f.reads.every(([, , scope, toolSet]) => scope === a && toolSet === noStepRoutes));
+
+  f.tools.set('subagent', { parameters: { properties: { model: { type: 'string' } } } });
+  assert.equal(f.render(a), '');
+  f.tools.set('subagent_fork', routeAware);
+  f.tools.delete('list_subagent_models');
+  const result = f.render(a);
+  assert.deepEqual(renderedGroups(result), [[strong], [weak]]);
+  assert.ok(!result.includes('list_subagent_models'));
+  assert.match(result, /Native delegation tools make the final admission decision/);
 });
 
-test('degradation between preparing an explicit call and dispatch prevents native creation', async () => {
-  const h = harness(multi(), (_ctx, Pipeline) => {
-    const prepare = Pipeline.prototype.prepare;
-    Pipeline.prototype.prepare = async function(exec) {
-      const result = prepare.call(this, exec);
-      await h.events.get('agent/created')(null);
-      return result;
-    };
+test('volatile values are reread, and old fields cannot influence the result', () => {
+  const a = agent();
+  let smart = [strong];
+  const config = Object.freeze({
+    smartModels: Object.freeze({ get() { return smart; } }),
+    get allowedModels() { assert.fail('old allowlist must not be read'); },
+    get defaultModel() { assert.fail('old default route must not be read'); },
+    get defaultReasoningEffort() { assert.fail('old default effort must not be read'); },
+    get fallbackToCurrentModel() { assert.fail('old fallback must not be read'); },
   });
-  await assert.rejects(h.invoke(spawn, args('stale')), /等待更新/);
-  assert.equal(h.calls.length, 0); assertDisabledOnce(h);
+  const f = fixture({ config, policy: new Map([[a.session, nativePolicy]]) });
+  assert.deepEqual(renderedGroups(f.render(a)), [[strong], [weak]]);
+  smart = [weak, inactive];
+  assert.deepEqual(renderedGroups(f.render(a)), [[weak], [strong]]);
+  smart = null;
+  assert.equal(f.render(a), '');
+  smart = [inactive];
+  assert.equal(f.render(a), '');
+  smart = [];
+  assert.equal(f.render(a), '');
 });
 
-test('ordinary provider, config, auth, cancellation and native failures never open breaker', async () => {
-  const h = harness(); const failure = new TypeError('PRIVATE is not a function');
-  h.native.execute = () => { throw failure; };
-  await assert.rejects(h.invoke(spawn, args('native')), e => e === failure);
-  await assert.rejects(h.invoke(spawn, args('model', { ...plain, reasoning_effort: 'high' })), /does not support/);
-  await assert.rejects(h.invoke(spawn, args('auth'), h.regular), /Only the Lead/);
-  await assert.rejects(h.invoke(spawn, args('permission'), h.lead, undefined, new Set()), /not admitted/);
-  const controller = new AbortController(); controller.abort();
-  await assert.rejects(h.invoke(spawn, args('cancel'), h.lead, controller.signal), /abort/i);
-  h.llm.resolveModelInfo = () => { throw failure; };
-  await assert.rejects(h.invoke(spawn, args('provider')), e => e === failure);
-  h.setPolicy({ ...multi(), allowedModels: [] }); await assert.rejects(h.invoke(list, {}), /at least one/);
-  h.setPolicy(multi()); assert.equal(h.tools.get(list).when({ agent: h.lead }), true);
-  assert.deepEqual([h.disabled, h.warnings], [[], []]);
-});
+test('read failures, malformed snapshots and absent runtime APIs fail inert without caching a permission', () => {
+  const a = agent();
+  const secret = 'private-diagnostic-must-not-leak';
+  const badPolicy = { get() { throw new Error(secret); } };
+  assert.equal(fixture({ policy: badPolicy }).render(a), '');
+  const throwing = fixture({ config: { smartModels: { get() { throw new Error(secret); } } }, policy: new Map([[a.session, nativePolicy]]) });
+  assert.equal(throwing.render(a), '');
 
-test('resolved-route mismatch refuses silent provider/model or effort fallback', async () => {
-  await assert.rejects(resolveRoute({ resolveModelInfo: async () => ({ id: 'wrong' }) }, terra), /different/);
-  const info = async () => metadata(terra.provider, terra.model);
-  await assert.rejects(resolveRoute({ resolveModelInfo: info, resolveCallConfig: async () => luna }, terra), /changed.*route/);
-  await assert.rejects(resolveRoute({ resolveModelInfo: info, resolveCallConfig: async () => selection(terra, 'low') }, selection(terra, 'ultra')), /changed.*effort/);
+  const f = fixture({ policy: new Map([[a.session, nativePolicy]]) });
+  assert.deepEqual(renderedGroups(f.render(a)), [[strong], [weak]]);
+  f.policy.set(a.session, [strong, null]);
+  assert.equal(f.render(a), '');
+  f.policy.delete(a.session);
+  assert.equal(f.render(a), '');
+  assert.equal(f.render(a, { toolSet: { get() { throw new Error(secret); } } }), '');
+
+  let fact;
+  installAdvice({ systemPrompt: { context(value) { fact = value; } } }, {});
+  assert.equal(fact.text({ agent: a, scope: a }), '');
 });

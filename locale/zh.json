@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "dsh-Agent-team-fix",
-    "description": "为新团队成员指定日常任务模型。遇到难题时，主模型可选用更聪明的模型，或沿用主窗口模型。"
+    "title": "Smarter-Subagent-level",
+    "description": "在 DSH 官方子智能体设置中标记困难任务候选模型；选模授权、创建和默认路由仍由 DSH 管理。"
   }
 }

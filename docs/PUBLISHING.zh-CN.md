@@ -4,10 +4,10 @@
 
 ## 发布自己的仓库
 
-1. 确认仓库名 `dsh-Agent-team-fix`、可见性和许可证。本仓库采用 MIT 许可证，包声明与仓库根目录的许可证正文保持一致。
+1. 确认仓库名 `dsh-Smarter-Subagent-level`、可见性和许可证。本仓库采用 MIT 许可证，包声明与仓库根目录的许可证正文保持一致。
 2. 在专用项目目录运行 `npm test`、`npm pack --dry-run`。检查待提交文件，只包含插件源码、测试、文档和包清单，不提交主机配置、凭据、日志或会话。
 3. 在 GitHub 建空仓库，不预生成 README，以本项目为仓库根目录。初始化 `main`，审阅暂存差异后提交，设置 `origin` 为自己的 HTTPS 或 SSH 地址，执行 `git push -u origin main`。不要覆盖已有历史，不把令牌写入仓库 URL。参考 [GitHub 官方说明](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github)。
-4. 为仓库添加 `dsh-plugin` topic；公开后从干净的兼容 profile 验证 `dsh plugin --profile web add github:OWNER/dsh-Agent-team-fix`。如发 Release，可打相应版本标签、附 `npm pack` 生成的 tgz 并公布校验和。发布仓库、Release、npm、市场投稿是不同操作。
+4. 为仓库添加 `dsh-plugin` topic；公开后从干净的兼容 profile 验证 `dsh plugin --profile web add github:OWNER/dsh-Smarter-Subagent-level`。如发 Release，可打相应版本标签、附 `npm pack` 生成的 tgz 并公布校验和。发布仓库、Release、npm、市场投稿是不同操作。
 
 ## 可选：发布 npm 公共包
 
@@ -19,16 +19,16 @@
 
 [dsh-market 项目](https://github.com/dsh-market/dsh-market#submit-your-plugin)从 [awesome-dsh-plugin 精选目录](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)收录。以下按其[贡献指南](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/main/contributing.md)整理，提交当日请复核。
 
-1. 确保公开仓库创建已满一天；有真实可用的代码、`dsh-plugin` topic、可安装的 `dsh.bundle` 和对应 patch。本项目是模型路由插件，建议 `category: model`。
-2. Fork **精选目录**，新建分支，仅添加 `data/plugins/OWNER__dsh-Agent-team-fix.yml`。不要直接编辑自动生成的 README。
+1. 确保公开仓库创建已满一天；有真实可用的代码、`dsh-plugin` topic、可安装的 `dsh.bundle` 和对应 patch。本项目是子智能体候选模型推荐插件，建议 `category: model`。已收录时更新现有条目，不新建重复条目。
+2. Fork **精选目录**，新建分支，仅添加 `data/plugins/OWNER__dsh-Smarter-Subagent-level.yml`。不要直接编辑自动生成的 README。
 
    ```yaml
-   url: https://github.com/OWNER/dsh-Agent-team-fix
-   name: OWNER/dsh-Agent-team-fix
+   url: https://github.com/OWNER/dsh-Smarter-Subagent-level
+   name: OWNER/dsh-Smarter-Subagent-level
    category: model
    description:
-     en: Routes DSH teammates to daily or difficult-task models with optional inheritance from the lead.
-     zh: 为 DSH 团队成员配置日常与困难任务模型，并支持困难任务沿用主窗口模型。
+     en: Groups authorized DSH subagent models into routine and difficult-task candidates without changing native routing.
+     zh: 在 DSH 已授权的子智能体模型中标注困难任务候选，不改原生路由。
    ```
 
 3. 如确实发布过 GitHub Release，可增加指向该 Release 上 `.tgz` 的 `tarball:`。版本化文件名配固定标签，不要用 `latest/download` 搭配会变化的文件名。
