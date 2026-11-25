@@ -1,35 +1,61 @@
-/** 纯数据层：只给原生已授权的路由分组；不选择、排序或修改模型。 */
-function exactRoutes(value) {
+/** 原生路由和模型元数据的纯数据边界；不推测别名、默认路由或 effort 等级。 */
+export function selectionOf(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const { provider, model, reasoningEffort } = value;
+  if (typeof provider !== 'string' || !provider || typeof model !== 'string' || !model
+      || (reasoningEffort !== undefined && (typeof reasoningEffort !== 'string' || !reasoningEffort))) return undefined;
+  return { provider, model, ...(reasoningEffort === undefined ? {} : { reasoningEffort }) };
+}
+
+export function routeKey({ provider, model }) {
+  return JSON.stringify([provider, model]);
+}
+
+export function sameSelection(a, b) {
+  return !!a && !!b && a.provider === b.provider && a.model === b.model && a.reasoningEffort === b.reasoningEffort;
+}
+
+/** 记录的白名单必须有效且没有重复；配置标注中的重复项可以合并。 */
+function exactRoutes(value, allowDuplicates) {
   if (!Array.isArray(value)) return undefined;
+  const keys = new Set();
   const routes = [];
   for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return undefined;
-    const { provider, model } = item;
-    if (typeof provider !== 'string' || !provider || typeof model !== 'string' || !model) return undefined;
+    const selection = selectionOf(item);
+    if (!selection) return undefined;
+    const { provider, model } = selection;
+    const key = routeKey(selection);
+    if (keys.has(key)) {
+      if (!allowDuplicates) return undefined;
+      continue;
+    }
+    keys.add(key);
     routes.push({ provider, model });
   }
   return routes;
 }
 
-function routeKey({ provider, model }) {
-  return JSON.stringify([provider, model]);
-}
-
-/**
- * 使用原生快照的顺序和标识；配置中不在快照内的项没有任何影响。
- * @param {unknown} policy 原生会话模型白名单；无效、缺失或为空时无建议。
- * @param {unknown} smartModels 用户标注的精确 provider/model 对；重复标注合并。
- * @returns {{ difficult: {provider: string, model: string}[], routine: {provider: string, model: string}[] } | undefined} 两组独立副本；没有授权困难候选时不提供分组，不比较实际能力。
- */
-export function difficultyCandidates(policy, smartModels) {
-  const allowed = exactRoutes(policy);
-  const smart = exactRoutes(smartModels);
-  if (!allowed?.length || !smart?.length || new Set(allowed.map(routeKey)).size !== allowed.length) return undefined;
-
+/** 保留原生记录的顺序；空白名单不是授权，也不使用原生父模型兜底。 */
+export function groupRoutes(policy, smartModels) {
+  const allowed = exactRoutes(policy, false);
+  const smart = exactRoutes(smartModels, true);
+  if (!allowed?.length || !smart) return undefined;
   const smartKeys = new Set(smart.map(routeKey));
   const groups = { difficult: [], routine: [] };
-  for (const route of allowed) {
-    (smartKeys.has(routeKey(route)) ? groups.difficult : groups.routine).push(route);
-  }
-  return groups.difficult.length === 0 ? undefined : groups;
+  for (const route of allowed) groups[smartKeys.has(routeKey(route)) ? 'difficult' : 'routine'].push(route);
+  return groups;
+}
+
+/** 自动分类仅在用户设置了非空 smart 分组且存在原生白名单时生效。 */
+export function classifiedGroups(policy, smartModels) {
+  return smartModels?.length ? groupRoutes(policy, smartModels) : undefined;
+}
+
+
+/** 原生 rc.5 的 efforts 按能力由低到高排列；缺少或不合规时不猜测。 */
+export function effortIds(info) {
+  const efforts = info?.reasoning?.efforts;
+  if (!Array.isArray(efforts) || efforts.length === 0) return [];
+  const ids = efforts.map(item => item?.id);
+  return ids.every(id => typeof id === 'string' && id.length > 0) && new Set(ids).size === ids.length ? ids : [];
 }

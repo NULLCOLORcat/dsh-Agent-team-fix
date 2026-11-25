@@ -1,23 +1,26 @@
 {
   "name": "dsh-agent-team-fix",
-  "version": "0.4.0",
-  "description": "Recommend routine- and difficult-task models from the official DSH subagent allowlist.",
+  "version": "0.5.4",
+  "description": "Route authorized local DSH subagents by declared task difficulty and per-session modes.",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/NULLCOLORcat/dsh-Smarter-Subagent-level.git" },
   "type": "module",
   "main": "./index.js",
   "exports": { ".": "./index.js", "./client": "./client.js", "./locale/*.json": "./locale/*.json", "./package.json": "./package.json" },
-  "files": ["index.js", "runtime.js", "routing.js", "client.js", "locale", "cordis.patch.yml", "README.md"],
+  "files": ["index.js", "runtime.js", "routing.js", "session-modes.js", "client.js", "locale", "cordis.patch.yml", "README.md"],
   "engines": { "dsh": "0.2.2-rc.5" },
+  "dependencies": { "zod": "4.6.6" },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": ">=3.19.0 <4"
+    "@deepseek-ai/schemastery": ">=3.19.0 <4",
+    "@deepseek-ai/dsh-storage-domain": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.5"
   },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
-      "inject": ["@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager"],
+      "inject": ["@deepseek-ai/dsh-client-locale", "@deepseek-ai/dsh-client-ui-settings", "@deepseek-ai/dsh-client-ui-plugin-manager", "@deepseek-ai/dsh-client-ui-conversation"],
       "platform": "web"
     }
   },
-  "scripts": { "test": "node --test test.mjs test-client.mjs test-bootstrap.mjs" }
+  "scripts": { "test": "node --test test.mjs test-client.mjs test-bootstrap.mjs test-session-modes.mjs" }
 }
